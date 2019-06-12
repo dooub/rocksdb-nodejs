@@ -357,6 +357,10 @@ struct Database {
 
   ~Database () {
     if (db_ != NULL) {
+      for (std::map<std::string, rocksdb::ColumnFamilyHandle*>::iterator it = columnFamilies_.begin() ; it != columnFamilies_.end(); ++it) {
+        db_->DestroyColumnFamilyHandle(it->second);
+      }
+      columnFamilies_.clear();
       delete db_;
       db_ = NULL;
     }
@@ -365,16 +369,89 @@ struct Database {
   leveldb::Status Open (const leveldb::Options& options,
                         bool readOnly,
                         const char* location) {
-    if (readOnly) {
-      return rocksdb::DB::OpenForReadOnly(options, location, &db_);
-    } else {
-      return leveldb::DB::Open(options, location, &db_);
+    leveldb::Status s;
+
+    // Get Column Families
+    std::vector<leveldb::ColumnFamilyDescriptor> families;
+    std::vector<std::string> familyNames;
+    s = leveldb::DB::ListColumnFamilies(options, location, &familyNames);
+    if(s.ok()) {
+      for (std::vector<std::string>::iterator it = familyNames.begin() ; it != familyNames.end(); ++it) {
+        families.push_back(leveldb::ColumnFamilyDescriptor(*it, rocksdb::ColumnFamilyOptions()));
+      }
+    }else {
+      families.push_back(leveldb::ColumnFamilyDescriptor(leveldb::kDefaultColumnFamilyName, leveldb::ColumnFamilyOptions()));
+      familyNames.push_back(leveldb::kDefaultColumnFamilyName);
     }
+
+    std::vector<leveldb::ColumnFamilyHandle*> handles;// = new std::vector<leveldb::ColumnFamilyHandle*>();
+    if (readOnly) {
+      s = rocksdb::DB::OpenForReadOnly(options, location, families, &handles, &db_);
+    } else {
+      s = leveldb::DB::Open(options, location, families, &handles, &db_);
+    }
+
+    if(s.ok() && familyNames.size() > 0) {
+      for(int i =0; i < familyNames.size(); i++) {
+        columnFamilies_[familyNames[i]] = handles[i];
+      }
+    }
+
+    return s;
   }
 
   void CloseDatabase () {
+    for (std::map<std::string, rocksdb::ColumnFamilyHandle*>::iterator it = columnFamilies_.begin() ; it != columnFamilies_.end(); ++it) {
+      db_->DestroyColumnFamilyHandle(it->second);
+    }
+    columnFamilies_.clear();
     delete db_;
     db_ = NULL;
+  }
+
+  leveldb::ColumnFamilyHandle* GetColumnFamily(std::string &name) {
+
+  }
+
+  leveldb::Status CreateColumnFamily(std::string &name) {
+      rocksdb::ColumnFamilyOptions options;
+      // TODO - support https://github.com/facebook/rocksdb/blob/40af2381ecf95445675b7329c4a1c5f89f82d1ab/include/rocksdb/options.h#L81
+      //if (optsIndex != -1) {  
+        //v8::Local<v8::Object> opts = args[optsIndex].As<v8::Object>();
+        //OptionsHelper::ProcessWriteOptions(opts, &options);
+      //}
+      leveldb::ColumnFamilyHandle* cf;
+      leveldb::Status s = db_->CreateColumnFamily(options, name, &cf);
+      if (s.ok()) {
+        columnFamilies_[name] = cf;
+      }
+      return s;
+  }
+
+  leveldb::Status DeleteColumnFamily(std::string &name) {
+    int index = -1;
+    leveldb::ColumnFamilyHandle *handle = columnFamilies_.at(name);
+    if (handle) {
+      rocksdb::Status s = db_->DestroyColumnFamilyHandle(handle);
+      columnFamilies_.erase(name);
+      return s;
+    } else {
+      rocksdb::Status s = rocksdb::Status::NotFound();
+      return s;
+    }
+  }
+
+  leveldb::Status DropColumnFamily(std::string &name) {
+    int index = -1;
+    leveldb::ColumnFamilyHandle *handle = columnFamilies_.at(name);
+    if (handle) {
+      rocksdb::Status s = db_->DropColumnFamily(handle);
+      columnFamilies_.erase(name);
+      return s;
+    } else {
+      rocksdb::Status s = rocksdb::Status::NotFound();
+      return s;
+    }
   }
 
   leveldb::Status Put (const leveldb::WriteOptions& options,
@@ -383,15 +460,36 @@ struct Database {
     return db_->Put(options, key, value);
   }
 
+  leveldb::Status Put (const leveldb::WriteOptions& options,
+                       leveldb::ColumnFamilyHandle* column_family,
+                       leveldb::Slice key,
+                       leveldb::Slice value) {
+    return db_->Put(options, column_family, key, value);
+  }
+
+
   leveldb::Status Get (const leveldb::ReadOptions& options,
                        leveldb::Slice key,
                        std::string& value) {
     return db_->Get(options, key, &value);
   }
 
+  leveldb::Status Get (const leveldb::ReadOptions& options,
+                       leveldb::ColumnFamilyHandle* column_family,
+                       leveldb::Slice key,
+                       std::string& value) {
+    return db_->Get(options, column_family, key, &value);
+  }
+
   leveldb::Status Del (const leveldb::WriteOptions& options,
                        leveldb::Slice key) {
     return db_->Delete(options, key);
+  }
+
+  leveldb::Status Del (const leveldb::WriteOptions& options,
+                        leveldb::ColumnFamilyHandle* column_family,
+                        leveldb::Slice key) {
+    return db_->Delete(options, column_family, key);
   }
 
   leveldb::Status WriteBatch (const leveldb::WriteOptions& options,
@@ -419,8 +517,11 @@ struct Database {
     return db_->GetSnapshot();
   }
 
-  leveldb::Iterator* NewIterator (leveldb::ReadOptions* options) {
-    return db_->NewIterator(*options);
+  leveldb::Iterator* NewIterator (leveldb::ReadOptions* options, leveldb::ColumnFamilyHandle *columnFamily = NULL) {
+    if(!columnFamily) {
+      columnFamily = columnFamilies_.at("default");
+    }
+    return db_->NewIterator(*options, columnFamily);
   }
 
   void ReleaseSnapshot (const leveldb::Snapshot* snapshot) {
@@ -457,6 +558,7 @@ struct Database {
   uint32_t currentIteratorId_;
   BaseWorker *pendingCloseWorker_;
   std::map< uint32_t, Iterator * > iterators_;
+  std::map< std::string, leveldb::ColumnFamilyHandle* > columnFamilies_;
 
 private:
   uint32_t priorityWork_;
@@ -506,7 +608,8 @@ struct Iterator {
             bool fillCache,
             bool keyAsBuffer,
             bool valueAsBuffer,
-            uint32_t highWaterMark)
+            uint32_t highWaterMark,
+            leveldb::ColumnFamilyHandle *cfHandle = NULL)
     : database_(database),
       id_(id),
       start_(start),
@@ -530,6 +633,7 @@ struct Iterator {
       nexting_(false),
       ended_(false),
       endWorker_(NULL),
+      cfHandle_(cfHandle),
       ref_(NULL) {
     options_ = new leveldb::ReadOptions();
     options_->fill_cache = fillCache;
@@ -602,7 +706,7 @@ struct Iterator {
   bool GetIterator () {
     if (dbIterator_ != NULL) return false;
 
-    dbIterator_ = database_->NewIterator(options_);
+    dbIterator_ = database_->NewIterator(options_, cfHandle_);
 
     if (start_ != NULL) {
       dbIterator_->Seek(*start_);
@@ -747,6 +851,7 @@ struct Iterator {
   bool ended_;
 
   leveldb::ReadOptions* options_;
+  leveldb::ColumnFamilyHandle *cfHandle_;
   EndWorker* endWorker_;
 
 private:
@@ -933,16 +1038,99 @@ NAPI_METHOD(db_close) {
 }
 
 /**
+ * Worker class for creating a column family
+ */
+struct CreateColumnFamilyWorker final : public PriorityWorker {
+  CreateColumnFamilyWorker (napi_env env,
+             Database* database,
+             napi_value callback,
+             std::string column_name
+          )
+    : PriorityWorker(env, database, callback, "leveldown.db.createColumnFamily"),
+      column_name_(column_name) {
+  }
+
+  ~CreateColumnFamilyWorker () {
+  }
+
+  void DoExecute () override {
+    SetStatus(database_->CreateColumnFamily(column_name_));
+  }
+
+  std::string column_name_;
+};
+
+/**
+ * Create a column family to a database.
+ */
+NAPI_METHOD(db_create_column_family) {
+  NAPI_ARGV(3);
+  NAPI_DB_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  napi_value callback = argv[2];
+
+  CreateColumnFamilyWorker* worker = new CreateColumnFamilyWorker(env, database, callback, cfs);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
+/**
+ * Worker class for dropping a column family
+ */
+struct DropColumnFamilyWorker final : public PriorityWorker {
+  DropColumnFamilyWorker (napi_env env,
+             Database* database,
+             napi_value callback,
+             std::string column_name
+          )
+    : PriorityWorker(env, database, callback, "leveldown.db.dropColumnFamily"),
+      column_name_(column_name) {
+  }
+
+  ~DropColumnFamilyWorker () {
+  }
+
+  void DoExecute () override {
+    SetStatus(database_->DropColumnFamily(column_name_));
+  }
+
+  std::string column_name_;
+};
+
+/**
+ * Create a column family to a database.
+ */
+NAPI_METHOD(db_drop_column_family) {
+  NAPI_ARGV(3);
+  NAPI_DB_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  napi_value callback = argv[2];
+
+  DropColumnFamilyWorker* worker = new DropColumnFamilyWorker(env, database, callback, cfs);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
+
+/**
  * Worker class for putting key/value to the database
  */
 struct PutWorker final : public PriorityWorker {
   PutWorker (napi_env env,
              Database* database,
              napi_value callback,
+             leveldb::ColumnFamilyHandle *column_handle,
              leveldb::Slice key,
              leveldb::Slice value,
              bool sync)
     : PriorityWorker(env, database, callback, "leveldown.db.put"),
+      column_handle_(column_handle),
       key_(key), value_(value) {
     options_.sync = sync;
   }
@@ -953,10 +1141,14 @@ struct PutWorker final : public PriorityWorker {
   }
 
   void DoExecute () override {
-    SetStatus(database_->Put(options_, key_, value_));
+    if(column_handle_)
+      SetStatus(database_->Put(options_, column_handle_, key_, value_));
+    else
+      SetStatus(database_->Put(options_, key_, value_));
   }
 
   leveldb::WriteOptions options_;
+  leveldb::ColumnFamilyHandle *column_handle_;
   leveldb::Slice key_;
   leveldb::Slice value_;
 };
@@ -973,11 +1165,33 @@ NAPI_METHOD(db_put) {
   bool sync = BooleanProperty(env, argv[3], "sync", false);
   napi_value callback = argv[4];
 
-  PutWorker* worker = new PutWorker(env, database, callback, key, value, sync);
+  PutWorker* worker = new PutWorker(env, database, callback, NULL, key, value, sync);
   worker->Queue();
 
   NAPI_RETURN_UNDEFINED();
 }
+
+/**
+ * Puts a key and a value to a database.
+ */
+NAPI_METHOD(db_put_with_column_families) {
+  NAPI_ARGV(6);
+  NAPI_DB_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  leveldb::Slice key = ToSlice(env, argv[2]);
+  leveldb::Slice value = ToSlice(env, argv[3]);
+  bool sync = BooleanProperty(env, argv[4], "sync", false);
+  napi_value callback = argv[5];
+
+  leveldb::ColumnFamilyHandle *cf = database->columnFamilies_.at(cfs);
+  PutWorker* worker = new PutWorker(env, database, callback, cf, key, value, sync);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
 
 /**
  * Worker class for getting a value from a database.
@@ -986,10 +1200,12 @@ struct GetWorker final : public PriorityWorker {
   GetWorker (napi_env env,
              Database* database,
              napi_value callback,
+             leveldb::ColumnFamilyHandle *column_handle,
              leveldb::Slice key,
              bool asBuffer,
              bool fillCache)
     : PriorityWorker(env, database, callback, "leveldown.db.get"),
+      column_handle_(column_handle),
       key_(key),
       asBuffer_(asBuffer) {
     options_.fill_cache = fillCache;
@@ -1000,7 +1216,10 @@ struct GetWorker final : public PriorityWorker {
   }
 
   void DoExecute () override {
-    SetStatus(database_->Get(options_, key_, value_));
+    if(column_handle_)
+      SetStatus(database_->Get(options_, column_handle_, key_, value_));
+    else
+      SetStatus(database_->Get(options_, key_, value_));
   }
 
   void HandleOKCallback () override {
@@ -1018,6 +1237,7 @@ struct GetWorker final : public PriorityWorker {
     CallFunction(env_, callback, 2, argv);
   }
 
+  leveldb::ColumnFamilyHandle *column_handle_;
   leveldb::ReadOptions options_;
   leveldb::Slice key_;
   std::string value_;
@@ -1037,12 +1257,33 @@ NAPI_METHOD(db_get) {
   bool fillCache = BooleanProperty(env, options, "fillCache", true);
   napi_value callback = argv[3];
 
-  GetWorker* worker = new GetWorker(env, database, callback, key, asBuffer,
+  GetWorker* worker = new GetWorker(env, database, callback, NULL, key, asBuffer,
                                     fillCache);
   worker->Queue();
 
   NAPI_RETURN_UNDEFINED();
 }
+
+NAPI_METHOD(db_get_with_column_families) {
+  NAPI_ARGV(5);
+  NAPI_DB_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  leveldb::Slice key = ToSlice(env, argv[2]);
+  napi_value options = argv[3];
+  bool asBuffer = BooleanProperty(env, options, "asBuffer", true);
+  bool fillCache = BooleanProperty(env, options, "fillCache", true);
+  napi_value callback = argv[4];
+
+  leveldb::ColumnFamilyHandle *cf = database->columnFamilies_.at(cfs);
+  GetWorker* worker = new GetWorker(env, database, callback, cf, key, asBuffer,
+                                    fillCache);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
 
 /**
  * Worker class for deleting a value from a database.
@@ -1051,9 +1292,11 @@ struct DelWorker final : public PriorityWorker {
   DelWorker (napi_env env,
              Database* database,
              napi_value callback,
+             leveldb::ColumnFamilyHandle *column_handle,
              leveldb::Slice key,
              bool sync)
     : PriorityWorker(env, database, callback, "leveldown.db.del"),
+      column_handle_(column_handle),
       key_(key) {
     options_.sync = sync;
   }
@@ -1066,6 +1309,7 @@ struct DelWorker final : public PriorityWorker {
     SetStatus(database_->Del(options_, key_));
   }
 
+  leveldb::ColumnFamilyHandle *column_handle_;
   leveldb::WriteOptions options_;
   leveldb::Slice key_;
 };
@@ -1081,11 +1325,29 @@ NAPI_METHOD(db_del) {
   bool sync = BooleanProperty(env, argv[2], "sync", false);
   napi_value callback = argv[3];
 
-  DelWorker* worker = new DelWorker(env, database, callback, key, sync);
+  DelWorker* worker = new DelWorker(env, database, callback, NULL, key, sync);
   worker->Queue();
 
   NAPI_RETURN_UNDEFINED();
 }
+
+NAPI_METHOD(db_del_with_column_families) {
+  NAPI_ARGV(5);
+  NAPI_DB_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  leveldb::Slice key = ToSlice(env, argv[2]);
+  bool sync = BooleanProperty(env, argv[3], "sync", false);
+  napi_value callback = argv[4];
+
+  leveldb::ColumnFamilyHandle *cf = database->columnFamilies_.at(cfs);
+  DelWorker* worker = new DelWorker(env, database, callback, cf, key, sync);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
 
 /**
  * Worker class for calculating the size of a range.
@@ -1325,6 +1587,11 @@ NAPI_METHOD(iterator_init) {
   int limit = Int32Property(env, options, "limit", -1);
   uint32_t highWaterMark = Uint32Property(env, options, "highWaterMark",
                                           16 * 1024);
+  leveldb::ColumnFamilyHandle *cfHandle = NULL;
+  if (HasProperty(env, options, "columnFamily")) {
+    std::string cfStr = StringProperty(env, options, "columnFamily");
+    cfHandle = database->columnFamilies_.at(cfStr);
+  }                                          
 
   // TODO simplify and refactor the hideous code below
 
@@ -1408,7 +1675,7 @@ NAPI_METHOD(iterator_init) {
   uint32_t id = database->currentIteratorId_++;
   Iterator* iterator = new Iterator(database, id, start, end, reverse, keys,
                                     values, limit, lt, lte, gt, gte, fillCache,
-                                    keyAsBuffer, valueAsBuffer, highWaterMark);
+                                    keyAsBuffer, valueAsBuffer, highWaterMark, cfHandle);
   napi_value result;
   napi_ref ref;
 
@@ -1701,8 +1968,15 @@ NAPI_METHOD(batch_do) {
     if (type == "del") {
       if (!HasProperty(env, element, "key")) continue;
       leveldb::Slice key = ToSlice(env, GetProperty(env, element, "key"));
-
-      batch->Delete(key);
+      if (HasProperty(env, element, "columnFamily")) {
+        LD_STRING_OR_BUFFER_TO_COPY(env, GetProperty(env, element, "columnFamily"), to);
+        std::string curCStr = toCh_;
+        leveldb::ColumnFamilyHandle *handle = database->columnFamilies_.at(curCStr);
+        if(handle)
+          batch->Delete(handle, key);
+      }else {
+        batch->Delete(key);
+      }
       if (!hasData) hasData = true;
 
       DisposeSliceBuffer(key);
@@ -1713,7 +1987,15 @@ NAPI_METHOD(batch_do) {
       leveldb::Slice key = ToSlice(env, GetProperty(env, element, "key"));
       leveldb::Slice value = ToSlice(env, GetProperty(env, element, "value"));
 
-      batch->Put(key, value);
+      if (HasProperty(env, element, "columnFamily")) {
+        LD_STRING_OR_BUFFER_TO_COPY(env, GetProperty(env, element, "columnFamily"), to);
+        std::string curCStr = toCh_;
+        leveldb::ColumnFamilyHandle *handle = database->columnFamilies_.at(curCStr);
+        if(handle)
+          batch->Put(handle, key, value);
+      }else {
+        batch->Put(key, value);
+      }
       if (!hasData) hasData = true;
 
       DisposeSliceBuffer(key);
@@ -1740,8 +2022,18 @@ struct Batch {
     delete batch_;
   }
 
+  void Put (leveldb::ColumnFamilyHandle *column_handle, leveldb::Slice key, leveldb::Slice value) {
+    batch_->Put(column_handle, key, value);
+    hasData_ = true;
+  }
+
   void Put (leveldb::Slice key, leveldb::Slice value) {
     batch_->Put(key, value);
+    hasData_ = true;
+  }
+
+  void Del (leveldb::ColumnFamilyHandle *column_handle, leveldb::Slice key) {
+    batch_->Delete(column_handle, key);
     hasData_ = true;
   }
 
@@ -1808,6 +2100,27 @@ NAPI_METHOD(batch_put) {
 }
 
 /**
+ * Adds a put instruction to a batch object.
+ */
+NAPI_METHOD(batch_put_with_column_families) {
+  NAPI_ARGV(4);
+  NAPI_BATCH_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  leveldb::ColumnFamilyHandle *handle = batch->database_->columnFamilies_[cfs];
+
+  leveldb::Slice key = ToSlice(env, argv[2]);
+  leveldb::Slice value = ToSlice(env, argv[3]);
+  batch->Put(handle, key, value);
+  DisposeSliceBuffer(key);
+  DisposeSliceBuffer(value);
+
+  NAPI_RETURN_UNDEFINED();
+}
+
+
+/**
  * Adds a delete instruction to a batch object.
  */
 NAPI_METHOD(batch_del) {
@@ -1820,6 +2133,25 @@ NAPI_METHOD(batch_del) {
 
   NAPI_RETURN_UNDEFINED();
 }
+
+/**
+ * Adds a delete instruction to a batch object.
+ */
+NAPI_METHOD(batch_del_with_column_families) {
+  NAPI_ARGV(3);
+  NAPI_BATCH_CONTEXT();
+
+  LD_STRING_OR_BUFFER_TO_COPY(env, argv[1], to);
+  std::string cfs = toCh_;
+  leveldb::ColumnFamilyHandle *handle = batch->database_->columnFamilies_[cfs];
+
+  leveldb::Slice key = ToSlice(env, argv[2]);
+  batch->Del(handle, key);
+  DisposeSliceBuffer(key);
+
+  NAPI_RETURN_UNDEFINED();
+}
+
 
 /**
  * Clears a batch object.
@@ -1890,9 +2222,14 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(db_init);
   NAPI_EXPORT_FUNCTION(db_open);
   NAPI_EXPORT_FUNCTION(db_close);
+  NAPI_EXPORT_FUNCTION(db_create_column_family);
+  NAPI_EXPORT_FUNCTION(db_drop_column_family);
   NAPI_EXPORT_FUNCTION(db_put);
+  NAPI_EXPORT_FUNCTION(db_put_with_column_families);
   NAPI_EXPORT_FUNCTION(db_get);
+  NAPI_EXPORT_FUNCTION(db_get_with_column_families);
   NAPI_EXPORT_FUNCTION(db_del);
+  NAPI_EXPORT_FUNCTION(db_del_with_column_families);
   NAPI_EXPORT_FUNCTION(db_approximate_size);
   NAPI_EXPORT_FUNCTION(db_compact_range);
   NAPI_EXPORT_FUNCTION(db_get_property);
@@ -1908,7 +2245,9 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(batch_do);
   NAPI_EXPORT_FUNCTION(batch_init);
   NAPI_EXPORT_FUNCTION(batch_put);
+  NAPI_EXPORT_FUNCTION(batch_put_with_column_families);
   NAPI_EXPORT_FUNCTION(batch_del);
+  NAPI_EXPORT_FUNCTION(batch_del_with_column_families);
   NAPI_EXPORT_FUNCTION(batch_clear);
   NAPI_EXPORT_FUNCTION(batch_write);
 }

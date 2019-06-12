@@ -29,6 +29,14 @@ LevelDOWN.prototype._close = function (callback) {
   binding.db_close(this.context, callback)
 }
 
+LevelDOWN.prototype.createColumnFamily = function (columnFamily, callback) {
+  binding.db_create_column_family(this.context, columnFamily, callback)
+}
+
+LevelDOWN.prototype.dropColumnFamily = function (columnFamily, callback) {
+  binding.db_drop_column_family(this.context, columnFamily, callback)
+}
+
 LevelDOWN.prototype._serializeKey = function (key) {
   return Buffer.isBuffer(key) ? key : String(key)
 }
@@ -41,12 +49,66 @@ LevelDOWN.prototype._put = function (key, value, options, callback) {
   binding.db_put(this.context, key, value, options, callback)
 }
 
+LevelDOWN.prototype.putWithColumnFamily = function (columnFamily, key, value, options, callback) {
+  if (typeof options === 'function') callback = options
+
+  if (typeof callback !== 'function') {
+    throw new Error('put() requires a callback argument')
+  }
+
+  var err = this._checkKey(key) || this._checkValue(value)
+  if (err) return process.nextTick(callback, err)
+
+  key = this._serializeKey(key)
+  value = this._serializeValue(value)
+
+  if (typeof options !== 'object' || options === null) options = {}
+
+  binding.db_put_with_column_families(this.context, columnFamily, key, value, options, callback)
+}
+
 LevelDOWN.prototype._get = function (key, options, callback) {
   binding.db_get(this.context, key, options, callback)
 }
 
+LevelDOWN.prototype.getWithColumnFamily = function (columnFamily, key, options, callback) {
+  if (typeof options === 'function') callback = options
+
+  if (typeof callback !== 'function') {
+    throw new Error('get() requires a callback argument')
+  }
+
+  var err = this._checkKey(key)
+  if (err) return process.nextTick(callback, err)
+
+  key = this._serializeKey(key)
+
+  if (typeof options !== 'object' || options === null) options = {}
+
+  options.asBuffer = options.asBuffer !== false
+
+  binding.db_get_with_column_families(this.context, columnFamily, key, options, callback)
+}
+
 LevelDOWN.prototype._del = function (key, options, callback) {
   binding.db_del(this.context, key, options, callback)
+}
+
+AbstractLevelDOWN.prototype.delWithColumnFamilty = function (key, options, callback) {
+  if (typeof options === 'function') callback = options
+
+  if (typeof callback !== 'function') {
+    throw new Error('del() requires a callback argument')
+  }
+
+  var err = this._checkKey(key)
+  if (err) return process.nextTick(callback, err)
+
+  key = this._serializeKey(key)
+
+  if (typeof options !== 'object' || options === null) options = {}
+
+  binding.db_del_with_column_families(this.context, key, options, callback)
 }
 
 LevelDOWN.prototype._chainedBatch = function () {
