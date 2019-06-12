@@ -94,7 +94,7 @@ LevelDOWN.prototype._del = function (key, options, callback) {
   binding.db_del(this.context, key, options, callback)
 }
 
-AbstractLevelDOWN.prototype.delWithColumnFamilty = function (key, options, callback) {
+AbstractLevelDOWN.prototype.delWithColumnFamily = function (columnFamily, key, options, callback) {
   if (typeof options === 'function') callback = options
 
   if (typeof callback !== 'function') {
@@ -108,7 +108,7 @@ AbstractLevelDOWN.prototype.delWithColumnFamilty = function (key, options, callb
 
   if (typeof options !== 'object' || options === null) options = {}
 
-  binding.db_del_with_column_families(this.context, key, options, callback)
+  binding.db_del_with_column_families(this.context, columnFamily, key, options, callback)
 }
 
 LevelDOWN.prototype._chainedBatch = function () {

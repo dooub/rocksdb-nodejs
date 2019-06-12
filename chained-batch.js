@@ -7,7 +7,7 @@ function ChainedBatch (db) {
   this.context = binding.batch_init(db.context)
 }
 
-ChainedBatch.prototype.putWithColumnFamily = function (column_family, key, value) {
+ChainedBatch.prototype.putWithColumnFamily = function (columnFamily, key, value) {
   this._checkWritten()
 
   var err = this.db._checkKey(key) || this.db._checkValue(value)
@@ -16,7 +16,7 @@ ChainedBatch.prototype.putWithColumnFamily = function (column_family, key, value
   key = this.db._serializeKey(key)
   value = this.db._serializeValue(value)
 
-  binding.batch_put_with_column_families(this.context, column_family, key, value)
+  binding.batch_put_with_column_families(this.context, columnFamily, key, value)
 
   return this
 }
@@ -29,18 +29,17 @@ ChainedBatch.prototype._del = function (key) {
   binding.batch_del(this.context, key)
 }
 
-ChainedBatch.prototype.delWithColumnFamily = function (column_family, key) {
+ChainedBatch.prototype.delWithColumnFamily = function (columnFamily, key) {
   this._checkWritten()
 
   var err = this.db._checkKey(key)
   if (err) throw err
 
   key = this.db._serializeKey(key)
-  binding.batch_del_with_column_families(this.context, column_family, key);
+  binding.batch_del_with_column_families(this.context, columnFamily, key)
 
   return this
 }
-
 
 ChainedBatch.prototype._clear = function () {
   binding.batch_clear(this.context)
