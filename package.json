@@ -1,7 +1,7 @@
 {
-  "name": "rocksdb-nodejs",
+  "name": "@dooub/rocksdb-nodejs",
   "version": "4.0.0",
-  "description": "A low-level Node.js RocksDB binding",
+  "description": "A low-level Node.js RocksDB binding with Column Family",
   "license": "MIT",
   "main": "leveldown.js",
   "scripts": {
@@ -59,9 +59,9 @@
   "gypfile": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/level/rocksdb.git"
+    "url": "https://github.com/dooub/rocksdb-nodejs.git"
   },
-  "homepage": "https://github.com/level/rocksdb",
+  "homepage": "https://github.com/dooub/rocksdb-nodejs",
   "keywords": [
     "leveldb",
     "level"

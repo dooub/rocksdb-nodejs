@@ -44,6 +44,8 @@ bench/
 test/
 .benchmarks/
 *.csv
+.vscode/
+testfolder/
 
 # Misc
 .nyc_output/
